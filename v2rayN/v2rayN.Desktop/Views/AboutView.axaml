@@ -1,0 +1,50 @@
+<UserControl
+    x:Class="v2rayN.Desktop.Views.AboutView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:resx="clr-namespace:ServiceLib.Resx;assembly=ServiceLib">
+    <Grid MinWidth="460" Background="White">
+        <Border
+            Margin="12"
+            Padding="24"
+            Background="White"
+            CornerRadius="12">
+        <DockPanel>
+            <StackPanel Spacing="10">
+                <Image
+                    Width="88"
+                    Height="88"
+                    HorizontalAlignment="Center"
+                    Source="/Assets/Firefly.jpg" />
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    FontSize="26"
+                    FontWeight="Bold"
+                    Text="流萤加速器" />
+            <TextBlock x:Name="txtVersion" HorizontalAlignment="Center" />
+            <Separator Margin="0,8" />
+
+            <TextBlock FontWeight="SemiBold" Text="{x:Static resx:ResUI.TbAboutWebsite}" />
+            <Button x:Name="btnWebsite" HorizontalAlignment="Left" />
+
+            <TextBlock FontWeight="SemiBold" Text="{x:Static resx:ResUI.TbAboutSourceCode}" />
+            <Button x:Name="btnSourceCode" HorizontalAlignment="Left" />
+
+            <TextBlock FontWeight="SemiBold" Text="{x:Static resx:ResUI.TbAboutAcknowledgements}" />
+            <TextBlock Text="{x:Static resx:ResUI.TbAboutUpstream}" TextWrapping="Wrap" />
+            <Button x:Name="btnUpstream" HorizontalAlignment="Left" />
+
+            <TextBlock FontWeight="SemiBold" Text="{x:Static resx:ResUI.TbAboutLicense}" />
+            <TextBlock Text="{x:Static resx:ResUI.TbAboutLicenseText}" TextWrapping="Wrap" />
+            <Button x:Name="btnLicense" HorizontalAlignment="Left" />
+
+                <Button
+                    x:Name="btnClose"
+                    Margin="0,14,0,0"
+                    HorizontalAlignment="Right"
+                    Content="{x:Static resx:ResUI.menuClose}" />
+            </StackPanel>
+        </DockPanel>
+        </Border>
+    </Grid>
+</UserControl>
