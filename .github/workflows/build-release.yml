@@ -211,7 +211,7 @@ jobs:
 
     steps:
       - name: Download completed packages
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: FireflyVPN-*
           path: release-assets
