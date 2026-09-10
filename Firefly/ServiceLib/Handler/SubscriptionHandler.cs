@@ -1,0 +1,263 @@
+namespace ServiceLib.Handler;
+
+public static class SubscriptionHandler
+{
+    public static async Task<IReadOnlyList<string>> UpdateProcess(
+        Config config,
+        string subId,
+        bool blProxy,
+        Func<bool, string, Task> updateFunc,
+        bool deferFailureNotification = false)
+    {
+        await updateFunc?.Invoke(false, ResUI.MsgUpdateSubscriptionStart);
+        var subItem = await AppManager.Instance.SubItems();
+
+        if (subItem is not { Count: > 0 })
+        {
+            await updateFunc?.Invoke(false, ResUI.MsgNoValidSubscription);
+            return [];
+        }
+
+        var successCount = 0;
+        var failedGroupNames = new List<string>();
+        foreach (var item in subItem)
+        {
+            try
+            {
+                if (!IsValidSubscription(item, subId))
+                {
+                    continue;
+                }
+
+                var hashCode = $"{item.Remarks}->";
+                if (item.Enabled == false)
+                {
+                    await updateFunc?.Invoke(false, $"{hashCode}{ResUI.MsgSkipSubscriptionUpdate}");
+                    continue;
+                }
+
+                // Create download handler
+                var downloadHandle = CreateDownloadHandler(hashCode, updateFunc);
+                await updateFunc?.Invoke(false, $"{hashCode}{ResUI.MsgStartGettingSubscriptions}");
+
+                // Get all subscription content (main subscription + additional subscriptions)
+                var result = await DownloadAllSubscriptions(config, item, blProxy, downloadHandle);
+
+                // Process download result
+                if (await ProcessDownloadResult(config, item.Id, result, hashCode, updateFunc))
+                {
+                    successCount++;
+                }
+                else
+                {
+                    failedGroupNames.Add(item.Remarks.TrimEx());
+                }
+
+                await updateFunc?.Invoke(false, "-------------------------------------------------------");
+            }
+            catch (Exception ex)
+            {
+                var hashCode = $"{item.Remarks}->";
+                Logging.SaveLog("UpdateSubscription", ex);
+                failedGroupNames.Add(item.Remarks.TrimEx());
+                await updateFunc?.Invoke(false, $"{hashCode}{ResUI.MsgFailedImportSubscription}: {ex.Message}");
+                await updateFunc?.Invoke(false, "-------------------------------------------------------");
+            }
+        }
+
+        await updateFunc?.Invoke(successCount > 0, $"{ResUI.MsgUpdateSubscriptionEnd}");
+        if (!deferFailureNotification && failedGroupNames.Count > 0)
+        {
+            FireflyNodeRequestRetryPolicy.NotifyFinalFailure(failedGroupNames);
+        }
+        return failedGroupNames;
+    }
+
+    private static bool IsValidSubscription(SubItem item, string subId)
+    {
+        var id = item.Id.TrimEx();
+        var url = item.Url.TrimEx();
+
+        if (id.IsNullOrEmpty() || url.IsNullOrEmpty())
+        {
+            return false;
+        }
+
+        if (subId.IsNotEmpty() && item.Id != subId)
+        {
+            return false;
+        }
+
+        if (!url.StartsWith(Global.HttpsProtocol) && !url.StartsWith(Global.HttpProtocol))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static DownloadService CreateDownloadHandler(string hashCode, Func<bool, string, Task> updateFunc)
+    {
+        var downloadHandle = new DownloadService();
+        downloadHandle.Error += (sender2, args) => updateFunc?.Invoke(false, $"{hashCode}{args.GetException().Message}");
+        return downloadHandle;
+    }
+
+    private static async Task<string> DownloadSubscriptionContent(
+        DownloadService downloadHandle,
+        string url,
+        bool blProxy,
+        string userAgent,
+        string? groupName)
+    {
+        var result = await FireflyNodeRequestRetryPolicy.ExecuteAsync(async () =>
+        {
+            var downloadResult = await downloadHandle.TryDownloadStringWithHeaders(url, blProxy, userAgent);
+
+            // If download with proxy fails, try direct connection before
+            // counting this request as a retryable failure.
+            if (blProxy && downloadResult?.Content.IsNullOrEmpty() != false)
+            {
+                downloadResult = await downloadHandle.TryDownloadStringWithHeaders(url, false, userAgent);
+            }
+
+            return downloadResult?.Content.IsNotEmpty() == true ? downloadResult : null;
+        }, groupName, notifyFinalFailure: false);
+
+        if (result is null)
+        {
+            return string.Empty;
+        }
+
+        return result.Content;
+    }
+
+    private static async Task<string> DownloadAllSubscriptions(Config config, SubItem item, bool blProxy, DownloadService downloadHandle)
+    {
+        if (FireflyManagedSubscriptionPolicy.IsManagedSubscription(item))
+        {
+            var sourceId = item.Memo![FireflyManagedSubscriptionPolicy.ManagedSubscriptionMemoPrefix.Length..];
+            return await new FireflyWorkerService().DownloadSubscriptionAsync(
+                config, sourceId, blProxy, item.Remarks, deferFailureNotification: true);
+        }
+
+        // Download main subscription content
+        var result = await DownloadMainSubscription(config, item, blProxy, downloadHandle);
+
+        // Process additional subscription links (if any)
+        if (item.ConvertTarget.IsNullOrEmpty() && item.MoreUrl.TrimEx().IsNotEmpty())
+        {
+            result = await DownloadAdditionalSubscriptions(item, result, blProxy, downloadHandle);
+        }
+
+        return result;
+    }
+
+    private static async Task<string> DownloadMainSubscription(Config config, SubItem item, bool blProxy, DownloadService downloadHandle)
+    {
+        // Prepare subscription URL and download directly
+        var url = Utils.GetPunycode(item.Url.TrimEx());
+
+        // If conversion is needed
+        if (item.ConvertTarget.IsNotEmpty())
+        {
+            var subConvertUrl = config.ConstItem.SubConvertUrl.IsNullOrEmpty()
+                ? Global.SubConvertUrls.FirstOrDefault()
+                : config.ConstItem.SubConvertUrl;
+
+            url = string.Format(subConvertUrl!, Utils.UrlEncode(url));
+
+            if (!url.Contains("target="))
+            {
+                url += $"&target={item.ConvertTarget}";
+            }
+
+            if (!url.Contains("config="))
+            {
+                url += $"&config={Global.SubConvertConfig.FirstOrDefault()}";
+            }
+        }
+
+        // Download and return result directly
+        return await DownloadSubscriptionContent(
+            downloadHandle, url, blProxy, item.UserAgent, item.Remarks);
+    }
+
+    private static async Task<string> DownloadAdditionalSubscriptions(SubItem item, string mainResult, bool blProxy, DownloadService downloadHandle)
+    {
+        var result = mainResult;
+
+        // If main subscription result is Base64 encoded, decode it first
+        if (result.IsNotEmpty() && Utils.IsBase64String(result))
+        {
+            result = Utils.Base64Decode(result);
+        }
+
+        // Process additional URL list
+        var lstUrl = item.MoreUrl.TrimEx().Split(",") ?? [];
+        foreach (var it in lstUrl)
+        {
+            var url2 = Utils.GetPunycode(it);
+            if (url2.IsNullOrEmpty())
+            {
+                continue;
+            }
+
+            var additionalResult = await DownloadSubscriptionContent(
+                downloadHandle, url2, blProxy, item.UserAgent, item.Remarks);
+
+            if (additionalResult.IsNotEmpty())
+            {
+                // Process additional subscription results, add to main result
+                if (Utils.IsBase64String(additionalResult))
+                {
+                    result += Environment.NewLine + Utils.Base64Decode(additionalResult);
+                }
+                else
+                {
+                    result += Environment.NewLine + additionalResult;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static async Task<bool> ProcessDownloadResult(Config config, string id, string result, string hashCode, Func<bool, string, Task> updateFunc)
+    {
+        var isFireflyManaged = await FireflyManagedSubscriptionPolicy.IsManagedSubscriptionIdAsync(id);
+        if (result.IsNullOrEmpty())
+        {
+            await updateFunc?.Invoke(false, $"{hashCode}{ResUI.MsgSubscriptionDecodingFailed}");
+            return false;
+        }
+
+        await updateFunc?.Invoke(false, $"{hashCode}{ResUI.MsgGetSubscriptionSuccessfully}");
+
+        // If result is too short, display content directly
+        if (!isFireflyManaged && result.Length < 99)
+        {
+            await updateFunc?.Invoke(false, $"{hashCode}{result}");
+        }
+
+        await updateFunc?.Invoke(false, $"{hashCode}{ResUI.MsgStartParsingSubscription}");
+
+        // Add servers to configuration
+        var ret = await ConfigHandler.AddBatchServers(config, result, id, true);
+        if (ret <= 0)
+        {
+            Logging.SaveLog("FailedImportSubscription");
+            if (!isFireflyManaged)
+            {
+                Logging.SaveLog(result);
+            }
+        }
+
+        // Update completion message
+        await updateFunc?.Invoke(false, ret > 0
+                ? $"{hashCode}{ResUI.MsgUpdateSubscriptionEnd}"
+                : $"{hashCode}{ResUI.MsgFailedImportSubscription}");
+
+        return ret > 0;
+    }
+}

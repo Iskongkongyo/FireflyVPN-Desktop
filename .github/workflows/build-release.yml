@@ -1,0 +1,264 @@
+name: Build FireflyVPN release
+
+on:
+  push:
+    tags:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  # Core downloads need read access; publishing the completed packages to the
+  # tag's GitHub Release needs write access to repository contents.
+  contents: write
+
+# Define FIREFLY_CLIENT_API_URL as an Actions secret before creating a Tag.
+# It is passed only to the compilation/package steps and is never stored in source.
+
+concurrency:
+  group: fireflyvpn-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Windows x64 and x86
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Ensure Inno Setup is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+            choco install innosetup --yes --no-progress
+          }
+
+      - name: Download and verify fixed Windows cores
+        shell: pwsh
+        env:
+          # Use the run-scoped token for GitHub Release API requests. Anonymous
+          # requests from shared Actions runners can otherwise receive HTTP 403.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\download-cores-windows.ps1 -Architecture all
+
+      - name: Build portable packages and Chinese installers
+        shell: pwsh
+        env:
+          FIREFLY_CLIENT_API_URL: ${{ secrets.FIREFLY_CLIENT_API_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $endpoint = $null
+          if ([string]::IsNullOrWhiteSpace($env:FIREFLY_CLIENT_API_URL) -or
+              -not [Uri]::TryCreate($env:FIREFLY_CLIENT_API_URL, [UriKind]::Absolute, [ref]$endpoint)) {
+            throw 'FIREFLY_CLIENT_API_URL must be a non-empty absolute HTTPS URL.'
+          }
+          if ($endpoint.Scheme -ne 'https' -or [string]::IsNullOrWhiteSpace($endpoint.Host)) {
+            throw 'FIREFLY_CLIENT_API_URL must be a non-empty absolute HTTPS URL.'
+          }
+          & .\package-windows.ps1 -Architecture all -PackageFormat all
+
+      - name: Upload Windows release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: FireflyVPN-Windows-${{ github.ref_name }}
+          path: |
+            artifacts/流萤加速器-win-x64.zip
+            artifacts/流萤加速器-Setup-win-x64.exe
+            artifacts/流萤加速器-win-x86.zip
+            artifacts/流萤加速器-Setup-win-x86.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos-x64:
+    name: macOS Intel x64
+    runs-on: macos-15-intel
+    env:
+      ARCHITECTURE: x64
+      RUNTIME_IDENTIFIER: osx-x64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install DMG packaging tool
+        shell: bash
+        run: brew list create-dmg >/dev/null 2>&1 || brew install create-dmg
+
+      - name: Download and verify fixed macOS cores
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/download-cores-macos.sh package-osx.sh
+          ./scripts/download-cores-macos.sh "$ARCHITECTURE"
+
+      - name: Publish and package macOS application
+        shell: bash
+        env:
+          FIREFLY_CLIENT_API_URL: ${{ secrets.FIREFLY_CLIENT_API_URL }}
+        run: |
+          if [[ ! "$FIREFLY_CLIENT_API_URL" =~ ^https://[^/?#[:space:]]+ ]]; then
+            echo 'FIREFLY_CLIENT_API_URL must be a non-empty absolute HTTPS URL.' >&2
+            exit 1
+          fi
+          publish_directory="artifacts/publish/$RUNTIME_IDENTIFIER"
+          dotnet restore Firefly/Firefly.Desktop/Firefly.Desktop.csproj --runtime "$RUNTIME_IDENTIFIER"
+          dotnet publish Firefly/Firefly.Desktop/Firefly.Desktop.csproj \
+            --configuration Release \
+            --runtime "$RUNTIME_IDENTIFIER" \
+            --self-contained true \
+            --no-restore \
+            --output "$publish_directory"
+          ./package-osx.sh "$ARCHITECTURE" "$publish_directory"
+
+      - name: Upload macOS Intel release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: FireflyVPN-macOS-x64-${{ github.ref_name }}
+          path: |
+            artifacts/流萤加速器-macos-x64.zip
+            artifacts/流萤加速器-macos-x64.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos-arm64:
+    name: macOS Apple Silicon arm64
+    runs-on: macos-15
+    env:
+      ARCHITECTURE: arm64
+      RUNTIME_IDENTIFIER: osx-arm64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install DMG packaging tool
+        shell: bash
+        run: brew list create-dmg >/dev/null 2>&1 || brew install create-dmg
+
+      - name: Download and verify fixed macOS cores
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/download-cores-macos.sh package-osx.sh
+          ./scripts/download-cores-macos.sh "$ARCHITECTURE"
+
+      - name: Publish and package macOS application
+        shell: bash
+        env:
+          FIREFLY_CLIENT_API_URL: ${{ secrets.FIREFLY_CLIENT_API_URL }}
+        run: |
+          if [[ ! "$FIREFLY_CLIENT_API_URL" =~ ^https://[^/?#[:space:]]+ ]]; then
+            echo 'FIREFLY_CLIENT_API_URL must be a non-empty absolute HTTPS URL.' >&2
+            exit 1
+          fi
+          publish_directory="artifacts/publish/$RUNTIME_IDENTIFIER"
+          dotnet restore Firefly/Firefly.Desktop/Firefly.Desktop.csproj --runtime "$RUNTIME_IDENTIFIER"
+          dotnet publish Firefly/Firefly.Desktop/Firefly.Desktop.csproj \
+            --configuration Release \
+            --runtime "$RUNTIME_IDENTIFIER" \
+            --self-contained true \
+            --no-restore \
+            --output "$publish_directory"
+          ./package-osx.sh "$ARCHITECTURE" "$publish_directory"
+
+      - name: Upload macOS Apple Silicon release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: FireflyVPN-macOS-arm64-${{ github.ref_name }}
+          path: |
+            artifacts/流萤加速器-macos-arm64.zip
+            artifacts/流萤加速器-macos-arm64.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    # A manual workflow run is useful for testing packages, but only a tag
+    # should create or alter a public GitHub Release.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-windows
+      - build-macos-x64
+      - build-macos-arm64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download completed packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: FireflyVPN-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          # Set the target explicitly so gh never needs a local .git directory.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          assets=(release-assets/*)
+          (( ${#assets[@]} > 0 )) || { echo 'No release assets were downloaded.' >&2; exit 1; }
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --title '流萤加速器PC端' --notes ''
+            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG_NAME" "${assets[@]}" --title '流萤加速器PC端' --notes ''
+          fi
+
+          # gh uploads the files correctly, but its asset display-name handling
+          # can omit non-ASCII prefixes. Set every public asset name explicitly.
+          # GitHub's release-asset endpoint strips this project's Chinese prefix.
+          # Use a stable ASCII name for the public download URLs instead.
+          brand='FireflyVPN'
+          matched_assets=0
+          while IFS=$'\t' read -r asset_id asset_name; do
+            case "$asset_name" in
+              *-macos-arm64.dmg) expected_name="$brand-macos-arm64.dmg" ;;
+              *-macos-arm64.zip) expected_name="$brand-macos-arm64.zip" ;;
+              *-macos-x64.dmg) expected_name="$brand-macos-x64.dmg" ;;
+              *-macos-x64.zip) expected_name="$brand-macos-x64.zip" ;;
+              *-Setup-win-x64.exe) expected_name="$brand-Setup-win-x64.exe" ;;
+              *-Setup-win-x86.exe) expected_name="$brand-Setup-win-x86.exe" ;;
+              *-win-x64.zip) expected_name="$brand-win-x64.zip" ;;
+              *-win-x86.zip) expected_name="$brand-win-x86.zip" ;;
+              *) continue ;;
+            esac
+            ((matched_assets += 1))
+            if [[ "$asset_name" != "$expected_name" ]]; then
+              actual_name="$(gh api --method PATCH "repos/$GH_REPO/releases/assets/$asset_id" -f "name=$expected_name" --jq '.name')"
+              [[ "$actual_name" == "$expected_name" ]] || { echo "Asset rename failed: expected $expected_name, got $actual_name." >&2; exit 1; }
+            fi
+          done < <(gh api "repos/$GH_REPO/releases/tags/$TAG_NAME" --jq '.assets[] | "\(.id)\t\(.name)"')
+          (( matched_assets == 8 )) || { echo "Expected 8 packaged assets, found $matched_assets." >&2; exit 1; }
