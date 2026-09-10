@@ -75,11 +75,16 @@ xattr -cr "$app_path"
 chmod +x "$macos_path/Firefly" "$macos_path/bin/sing_box/sing-box" "$macos_path/bin/xray/xray" "$macos_path/bin/mihomo/mihomo"
 while IFS= read -r -d '' native_file; do
   # .NET publishes native libraries beside the main executable as well as
-  # bundled cores. Sign every Mach-O file before signing the outer .app.
+  # bundled cores. Do not sign the bundle's main executable until all sibling
+  # native libraries are signed: codesign treats Contents/MacOS/Firefly as the
+  # bundle entry point and validates those siblings while replacing its
+  # existing signature.
+  [[ "$native_file" == "$macos_path/Firefly" ]] && continue
   if file -b "$native_file" | grep -q 'Mach-O'; then
     codesign --force --sign - --timestamp=none "$native_file"
   fi
 done < <(find "$macos_path" -type f -print0)
+codesign --force --sign - --timestamp=none "$macos_path/Firefly"
 codesign --force --sign - --timestamp=none "$app_path"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 
