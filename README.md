@@ -41,8 +41,8 @@
 
 后端开发、部署和完整接口说明：
 
-- [后端部署说明](./backend/README.md)
-- [API 契约](./backend/API.md)
+- [Worker部署说明](./backend/worker/README.md)、[Nodejs部署说明](./backend/nodejs/README.md)
+- [Worker部署API 契约](./backend/worker/API.md)、[Nodejs部署API 契约](./backend/nodejs/API.md)
 
 ## 社区
 
